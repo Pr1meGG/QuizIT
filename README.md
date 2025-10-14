@@ -30,12 +30,12 @@ This is a **pure Python project** that leverages the following technologies for 
 
 ## Project Structure
 
-QuizIT/
-├── .streamlit/
-│   └── secrets.toml      # Secure credentials (Firebase, etc.)
-├── quiz_data.db          # Optional: local cache (SQLite/Shelve)
-├── quiz_game.py # Main Streamlit app - This is the entry point
-├── README.md             # You're reading this!
+QuizIT/  
+├── .streamlit/      
+│    └── secrets.toml      # Secure credentials (Firebase, etc.)    
+├── quiz_data.db          # Optional: local cache (SQLite/Shelve)    
+├── quiz_game.py # Main Streamlit app - This is the entry point    
+├── README.md             # You're reading this!    
 └── requirements.txt      # All required Python dependencies
 
 ## Getting Started (How to Run It)
