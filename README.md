@@ -32,10 +32,17 @@ This is a **pure Python project** that leverages the following technologies for 
 
 QuizIT/
 ├── .streamlit/
-│   └── secrets.toml           # Secure credentials (Firebase, etc.)
+
+│
+
+└── secrets.toml           # Secure credentials (Firebase, etc.)
+
 ├── quiz_data.db               # Optional: local cache (SQLite/Shelve)
+
 ├── quiz_game.py               # Main Streamlit app
+
 ├── README.md                  # You’re reading this!
+
 └── requirements.txt           # All required Python dependencies
 
 ## Getting Started (How to Run It)
