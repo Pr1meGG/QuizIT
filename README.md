@@ -1,8 +1,11 @@
-🧠 QuizIT: The Global MCQs Master
-🚀 Live Demo
-Test your knowledge right now!
+⚔️ QuizIT: The Full-Stack MCQs Arena
 
-👉 Launch QuizIT Live App 👈([QuizIT](https://quizit-learnit-masterit.streamlit.app/))
+🚀 Live Demo
+
+Test your knowledge right now!
+Prove your skills. Climb the global leaderboard.
+
+👉 Launch [QuizIT](https://quizit-learnit-masterit.streamlit.app/) Live App 👈
 
 ✨ Project Overview
 QuizIT is a full-stack, competitive quiz application built entirely using Python. It provides users with a dynamic range of Multiple-Choice Questions (MCQs) fetched in real-time and features a global leaderboard to track scores and foster competition.
@@ -55,12 +58,13 @@ To run this project locally, ensure you have Python 3.9+ installed and follow th
 
 1. Clone the Repository
 git clone [https://github.com/Pr1meGG/QuizIT.git](https://github.com/Pr1meGG/QuizIT.git)
-cd QuizIT
 
-2. Install Dependencies
+2. cd QuizIT
+
+3. Install Dependencies
 pip install -r requirements.txt
 
-3. Setup Firebase Secrets (Required for Leaderboard)
+4. Setup Firebase Secrets (Required for Leaderboard)
 The application requires Firebase Admin SDK credentials for the leaderboard.
 
 Create a Firebase Project and enable Firestore Database.
@@ -76,8 +80,8 @@ Paste the contents of your JSON key into secrets.toml using the correct TOML for
 4. Run the Application
 streamlit run quiz_game.py
 
-📜 Repository Structure
+"`📜 Repository Structure
 QuizIT/
 │
 ├── quiz_game.py       <-- Main application file (UI, Logic, Firebase Calls)
-└── requirements.txt   <-- Python dependencies list
+└── requirements.txt   <-- Python dependencies list`"
