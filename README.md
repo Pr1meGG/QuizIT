@@ -2,7 +2,7 @@
 
 ## Overview
 
-Yo, check it! **QuizIT** is an **ultimate quiz platform** designed to deliver engaging, diverse trivia quizzes sourced from a massive public database. Built with a **pure Python stack**, it's a game-changer for anyone wanting to host quick, reliable, and fun knowledge tests. You can instantly fetch quizzes, host them for users, and get automatic, hassle-free grading.
+Yo, check it! **[QuizIT](https://quizit-learnit-masterit.streamlit.app/)** is an **ultimate quiz platform** designed to deliver engaging, diverse trivia quizzes sourced from a massive public database. Built with a **pure Python stack**, it's a game-changer for anyone wanting to host quick, reliable, and fun knowledge tests. You can instantly fetch quizzes, host them for users, and get automatic, hassle-free grading.
 
 ---
 
