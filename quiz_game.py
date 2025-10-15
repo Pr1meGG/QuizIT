@@ -6,6 +6,13 @@ import base64
 import html
 import random
 import time
+import os
+
+# --- GEMINI API / CONFIGURATION ---
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent"
+# FIX: Use a stable getter with a default path, ensuring the key is available.
+# We retrieve the key from the [gemini] section of st.secrets.
+API_KEY = st.secrets.get("gemini", {}).get("api_key", "")
 
 # --- FIREBASE / LEADERBOARD SETUP ---
 try:
@@ -15,7 +22,7 @@ try:
     # Check if a Firestore service account is available in st.secrets
     if 'firestore_creds' in st.secrets:
         if not firebase_admin._apps:
-            # st.secrets returns an AttrDict (a dictionary-like object)
+            # FIX: Convert Streamlit AttrDict to standard dict for Firebase compatibility
             creds_dict = st.secrets['firestore_creds']
             cred = credentials.Certificate(dict(creds_dict))
             firebase_admin.initialize_app(cred)
@@ -31,7 +38,7 @@ except ImportError:
         st.session_state.firebase_admin_installed = False
 
 
-# --- 1. CONFIGURATION AND API SETUP ---
+# --- 1. CONFIGURATION AND API SETUP (OpenTDB) ---
 API_URL = "https://opentdb.com/api.php"
 
 DIFFICULTY_OPTIONS = {
@@ -54,6 +61,49 @@ CATEGORY_OPTIONS = {
     "History": 23,
     "Sports": 21,
 }
+
+# --- Function to fetch explanation using Gemini ---
+def fetch_explanation(question, correct_answer):
+    """Fetches a detailed, grounded explanation for a question/answer pair using the Gemini API."""
+    
+    # Check the key here again to prevent the 403 error message
+    if not API_KEY:
+        return "Explanation API Key is missing. Cannot retrieve detailed rationale."
+
+    prompt = f"Provide a brief, single-paragraph, factual explanation detailing why '{correct_answer}' is the correct answer for the question: '{question}'."
+    
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "tools": [{"google_search": {} }],
+        "systemInstruction": {
+            "parts": [{"text": "You are a world-class trivia expert. Provide clear, concise, and educational explanations based on real-time search results."}]
+        }
+    }
+    
+    try:
+        # Using a direct requests call as this is running server-side
+        response = requests.post(
+            f"{GEMINI_API_URL}?key={API_KEY}",
+            json=payload,
+            headers={'Content-Type': 'application/json'}
+        )
+        response.raise_for_status()
+        
+        result = response.json()
+        
+        # Check for specific error message in the response body (e.g., rate limiting)
+        if 'error' in result:
+             return f"Error retrieving explanation: {result['error'].get('message', 'Unknown API Error')}"
+
+        text = result['candidates'][0]['content']['parts'][0]['text']
+        return text.strip()
+        
+    except requests.exceptions.HTTPError as e:
+        # Handle the 403 error explicitly
+        return f"Error retrieving explanation: HTTP {e.response.status_code}. The API key might be restricted."
+    except Exception as e:
+        return f"Could not retrieve a detailed explanation: {e}"
+
 
 def fetch_questions(difficulty, category_id, amount=10):
     """Fetches questions from the OpenTDB API based on user settings."""
@@ -109,27 +159,41 @@ def process_question_data(results):
 
 # --- 2. Streamlit App Logic ---
 
-def check_answer(user_choice, correct_answer):
-    """Checks the user's selected answer."""
-    if st.session_state.submitted:
+def check_answer():
+    """
+    Checks the user's selected answer from the form, updates score, and moves the index.
+    """
+    if f'radio_{st.session_state.current_index}' not in st.session_state:
         return
 
-    st.session_state.submitted = True
-
-    if user_choice == correct_answer:
-        st.session_state.score += 1
-        st.success("✅ Correct! You nailed it, genius!")
-    else:
-        st.error(f"❌ Incorrect. The correct answer was: **{correct_answer}**")
-        st.info("No worries, keep pushing!")
+    user_choice = st.session_state[f'radio_{st.session_state.current_index}']
+    correct_answer = st.session_state.questions_df.iloc[st.session_state.current_index]['answer']
+    question = st.session_state.questions_df.iloc[st.session_state.current_index]['question'] # Get question for explanation fetch
     
-    st.button("Next Question", on_click=next_question, type="primary")
+    # Initialize or append to history
+    if 'answer_history' not in st.session_state:
+        st.session_state.answer_history = []
+    
+    is_correct = user_choice == correct_answer
+    
+    st.session_state.submitted = True
+    
+    # Store the result for review
+    st.session_state.answer_history.append({
+        'question': question,
+        'user_answer': user_choice,
+        'correct_answer': correct_answer,
+        'is_correct': is_correct,
+        'explanation': None # Will be fetched when review mode is toggled
+    })
 
-def next_question():
-    """Moves to the next question and resets the submission state."""
+    if is_correct:
+        st.session_state.score += 1
+        st.session_state.last_result = "✅ Correct! Moving to the next question."
+    else:
+        st.session_state.last_result = f"❌ Incorrect. The correct answer was: **{correct_answer}**. Moving on."
+
     st.session_state.current_index += 1
-    st.session_state.submitted = False
-    st.rerun() 
 
 def start_quiz():
     """Fetches questions and starts the quiz based on selected options."""
@@ -147,12 +211,21 @@ def start_quiz():
             st.session_state.current_index = 0
             st.session_state.submitted = False
             st.session_state.quiz_started = True
-            st.session_state.score_submitted = False 
+            st.session_state.score_submitted = False
+            st.session_state.last_result = None
+            st.session_state.review_mode = False # Disable review mode
+            st.session_state.answer_history = [] # Clear history
             st.rerun()
         else:
             st.error("Fetched questions were empty or corrupted. Please try again.")
     else:
         pass 
+
+def start_quiz_same_settings():
+    """Starts a new quiz using the last used settings."""
+    st.session_state.quiz_started = False 
+    start_quiz() 
+
 
 def reset_quiz():
     """Resets the entire quiz session back to the settings screen."""
@@ -163,13 +236,47 @@ def reset_quiz():
     st.session_state.score = 0
     st.session_state.submitted = False
     st.session_state.score_submitted = False
+    st.session_state.last_result = None
+    st.session_state.review_mode = False
     if 'questions_df' in st.session_state:
         del st.session_state['questions_df']
     if 'num_questions' in st.session_state:
         del st.session_state['num_questions']
+    if 'answer_history' in st.session_state:
+        del st.session_state['answer_history']
     
     st.rerun()
 
+def toggle_review_mode():
+    """Toggles the state to view the quiz review page and fetches explanations if needed."""
+    if not st.session_state.get('review_mode', False):
+        # Only fetch explanations when entering review mode
+        if st.session_state.get('answer_history'):
+            if not API_KEY:
+                st.warning("Cannot fetch explanations: Gemini API Key is missing from the environment.")
+                st.session_state.review_mode = not st.session_state.get('review_mode', False)
+                st.rerun()
+                return
+
+            # Use a progress bar to show fetching status
+            progress_bar = st.progress(0, text="Fetching detailed explanations... Please wait.")
+            
+            history_length = len(st.session_state.answer_history)
+            
+            for i, item in enumerate(st.session_state.answer_history):
+                if item.get('explanation') is None:
+                    # Fetch and store the explanation
+                    explanation = fetch_explanation(item['question'], item['correct_answer'])
+                    st.session_state.answer_history[i]['explanation'] = explanation
+                
+                # Update progress bar
+                progress_bar.progress((i + 1) / history_length)
+                
+            progress_bar.empty() # Clear the progress bar after completion
+
+        
+    st.session_state.review_mode = not st.session_state.get('review_mode', False)
+    st.rerun()
 
 # --- 3. FIRESTORE LEADERBOARD FUNCTIONS ---
 
@@ -229,6 +336,7 @@ def get_leaderboard_data(limit=10):
     except Exception as e:
         st.info("No scores found yet! Be the first one to set a record.")
         return pd.DataFrame()
+
 def display_leaderboard():
     """Fetches and displays the top scores from Firestore."""
     st.subheader("🏆 Global Leaderboard")
@@ -239,7 +347,6 @@ def display_leaderboard():
             _**Leaderboard Offline:** Cannot connect to Firestore. Check your `.streamlit/secrets.toml` file._
             """
         )
-        # Displaying a placeholder for structure if DB is offline
         df_placeholder = get_leaderboard_data(limit=0)
         st.table(df_placeholder)
         return
@@ -252,17 +359,57 @@ def display_leaderboard():
     else:
         st.info("No scores found yet! Be the first one to set a record.")
 
+def display_review_page():
+    """Displays the answers and feedback for the completed quiz."""
+    st.header("🔍 Quiz Review")
+    st.markdown("---")
+    
+    if not st.session_state.get('answer_history'):
+        st.warning("No quiz history found to review.")
+        st.button("Return to Results", on_click=toggle_review_mode)
+        return
+        
+    for i, item in enumerate(st.session_state.answer_history):
+        is_correct = item['is_correct']
+        icon = "✅" if is_correct else "❌"
+        
+        # Use HTML for better styling in the review page
+        # FIX: The crucial change is ensuring this st.markdown call has unsafe_allow_html=True
+        st.markdown(f"""
+            <div style="padding: 15px; margin-bottom: 20px; border: 1px solid {'#1f3b4d' if is_correct else '#a83c3c'}; border-left: 5px solid {'#52c2c2' if is_correct else '#e84c4c'}; border-radius: 8px;">
+                <p style="font-weight: bold; font-size: 1.1em; color: #fff;">{icon} Question {i+1}: {item['question']}</p>
+                <p style="margin-bottom: 5px;">**Your Answer:** <span style="color: {'#52c2c2' if is_correct else '#e84c4c'}; font-weight: bold;">{item['user_answer']}</span> ({'Perfect!' if is_correct else 'Incorrect'})</p>
+                <p style="margin-top: 0;">**Correct Answer:** <span style="color: #52c2c2; font-weight: bold;">{item['correct_answer']}</span></p>
+                
+                <div style="margin-top: 15px; padding-top: 10px; border-top: 1px dashed #333;">
+                    <p style="font-weight: bold; color: #fff;">💡 Why it's right:</p>
+                    <p style="color: #ccc;">{item.get('explanation', 'Fetching explanation...')}</p>
+                </div>
+            </div>
+            """, unsafe_allow_html=True) # <-- THIS IS THE MISSING KEY
+
+    st.markdown("---")
+    st.button("Return to Results", on_click=toggle_review_mode, type="secondary")
+
 
 # --- 4. The Main App Function ---
 
 def main():
     """The main Streamlit application function."""
+    # FIX: Adding safe defaults to st.session_state before reading them
+    if 'selected_difficulty' not in st.session_state:
+        st.session_state['selected_difficulty'] = list(DIFFICULTY_OPTIONS.values())[0]
+    if 'selected_category' not in st.session_state:
+        st.session_state['selected_category'] = list(CATEGORY_OPTIONS.values())[0]
+    if 'review_mode' not in st.session_state:
+        st.session_state.review_mode = False
+
     st.set_page_config(page_title="The Python Quiz Master", layout="centered", initial_sidebar_state="expanded")
     
     st.markdown("""
         <style>
             /* Custom CSS for a clean, dark, modern look */
-            .css-1d3c0cr { padding-top: 2rem; } /* Reduce space above main content */
+            .css-1d3c0cr { padding-top: 2rem; }
             .stButton>button { 
                 border-radius: 12px; 
                 transition: all 0.3s;
@@ -272,14 +419,23 @@ def main():
             }
             .stAlert { border-radius: 12px; }
             
-            /* Hiding Streamlit's default hamburger menu for a cleaner look */
+            /* FIX: Hide the yellow 'Calling st.rerun() within a callback is a no-op.' banner */
+            /* This targets the specific element responsible for the annoying warning */
+            div[data-testid="stStatusWidget"] {
+                display: none !important;
+                height: 0px !important;
+                visibility: hidden !important;
+            }
+            
+            /* Hiding Streamlit's default hamburger menu and footer/header */
             #MainMenu {visibility: hidden;}
             footer {visibility: hidden;}
             header {visibility: hidden;}
-
+            .css-1kyxreq { visibility: hidden; } /* Hides the sidebar button container */
+            
             /* Custom aesthetic for the dynamic welcome section */
             .welcome-box {
-                background-color: #1f3b4d; /* Dark teal background */
+                background-color: #1f3b4d;
                 padding: 25px;
                 border-radius: 15px;
                 margin-top: 20px;
@@ -287,7 +443,7 @@ def main():
                 color: #e6f7ff;
             }
             .welcome-box h3 {
-                color: #52c2c2; /* Bright teal for heading */
+                color: #52c2c2;
                 margin-top: 0;
             }
         </style>
@@ -298,6 +454,8 @@ def main():
 
     if 'score_submitted' not in st.session_state:
         st.session_state.score_submitted = False
+    if 'last_result' not in st.session_state:
+        st.session_state.last_result = None
         
     selected_difficulty_name = next(
         (k for k, v in DIFFICULTY_OPTIONS.items() if v == st.session_state.get('selected_difficulty')), 
@@ -308,48 +466,62 @@ def main():
         list(CATEGORY_OPTIONS.keys())[0]
     )
 
-
-    # --- Quiz Settings Sidebar ---
+    # --- Sidebar control and visibility ---
     with st.sidebar:
-        st.header("Quiz Settings")
-        
-        selected_difficulty = st.selectbox(
-            "Select Difficulty:",
-            list(DIFFICULTY_OPTIONS.keys()),
-            index=list(DIFFICULTY_OPTIONS.keys()).index(selected_difficulty_name),
-            key='difficulty_select'
-        )
-        st.session_state['selected_difficulty'] = DIFFICULTY_OPTIONS[selected_difficulty]
-
-        selected_category = st.selectbox(
-            "Select Topic/Subject:",
-            list(CATEGORY_OPTIONS.keys()),
-            index=list(CATEGORY_OPTIONS.keys()).index(selected_category_name),
-            key='category_select'
-        )
-        st.session_state['selected_category'] = CATEGORY_OPTIONS[selected_category]
-        
-        st.button("Start New Quiz", on_click=start_quiz, type="primary", use_container_width=True)
-        st.button("Reset App", on_click=reset_quiz, type="secondary", use_container_width=True)
+        st.header("App Control")
+        st.button("Reset App", on_click=reset_quiz, use_container_width=True, help="Reset the app to the main settings page.")
+        st.info("App configuration is on the main dashboard for a cleaner look.")
 
 
     # --- Quiz Workflow ---
-    if 'quiz_started' not in st.session_state or st.session_state.quiz_started is False:
-        st.header("Welcome to the Ultimate MCQs Challenge!")
-        st.subheader(f"Current Selections: {selected_category} | Difficulty: {selected_difficulty}")
+    if st.session_state.get('review_mode', False):
+        display_review_page()
         
-        # --- FIX: Replaced placeholder image with dynamic welcome block ---
+    elif 'quiz_started' not in st.session_state or st.session_state.quiz_started is False:
+        # --- Landing Page (UX UPGRADE) ---
+        st.header("Welcome to the Ultimate MCQs Challenge!")
+        
+        # 1. Selection Inputs (Moved from Sidebar)
+        col1, col2 = st.columns(2)
+        with col1:
+            selected_difficulty = st.selectbox(
+                "Select Difficulty:",
+                list(DIFFICULTY_OPTIONS.keys()),
+                index=list(DIFFICULTY_OPTIONS.keys()).index(selected_difficulty_name),
+                key='difficulty_select'
+            )
+            st.session_state['selected_difficulty'] = DIFFICULTY_OPTIONS[selected_difficulty]
+
+        with col2:
+            selected_category = st.selectbox(
+                "Select Topic/Subject:",
+                list(CATEGORY_OPTIONS.keys()),
+                index=list(CATEGORY_OPTIONS.keys()).index(selected_category_name),
+                key='category_select'
+            )
+            st.session_state['selected_category'] = CATEGORY_OPTIONS[selected_category]
+
+        st.markdown("---")
+        
+        # 2. Start Button
+        st.button("🚀 START NEW QUIZ", on_click=start_quiz, type="primary", use_container_width=True)
+        
+        st.markdown("---")
+
+        # 3. Welcome Box (Aesthetics)
+        st.subheader("Challenge Details:")
         st.markdown(
             f"""
             <div class="welcome-box">
                 <h3>Ready to prove your genius?</h3>
-                <p>🌎 Challenge yourself with fresh, real-time questions in **{selected_category}**.</p>
-                <p>💪 Set your skill level to **{selected_difficulty}**.</p>
+                <p>🌎 Challenge yourself with fresh, real-time questions in **{selected_category_name}**.</p>
+                <p>💪 Set your skill level to **{selected_difficulty_name}**.</p>
                 <p>🥇 Rank on the Global Leaderboard!</p>
-                <p>Click **'Start New Quiz'** on the left to begin your challenge!</p>
+                <p>Click the **'START NEW QUIZ'** button above to begin your challenge!</p>
             </div>
             """, unsafe_allow_html=True
         )
+        
         st.markdown("---")
         
         display_leaderboard()
@@ -362,8 +534,15 @@ def main():
         score = st.session_state.score
         questions_df = st.session_state.questions_df
         
-        st.markdown(f"**Topic:** `{selected_category}` | **Difficulty:** `{selected_difficulty}`")
-        st.metric(label="Current Score", value=f"{score} / {num_questions}") 
+        # Display previous result if available
+        if st.session_state.last_result:
+            if st.session_state.last_result == "✅ Correct! Moving to the next question.":
+                st.success(st.session_state.last_result)
+            else:
+                st.error(st.session_state.last_result)
+            st.session_state.last_result = None # Clear feedback after display
+
+        st.markdown(f"**Topic:** `{selected_category_name}` | **Difficulty:** `{selected_difficulty_name}`")
         
         st.markdown(f"**Question {current_index + 1} of {num_questions}**")
         st.progress((current_index + 1) / num_questions)
@@ -374,11 +553,11 @@ def main():
         
         question_text = current_q['question']
         options = current_q['options']
-        correct_answer = current_q['answer']
         
         st.subheader(f"❓ {question_text}")
-
-        with st.form(key=f'question_form_{current_index}'):
+        
+        # FIX: Using st.form's onSubmit to prevent double-click issues and calling st.rerun
+        with st.form(key=f'question_form_{current_index}', clear_on_submit=False):
             user_choice = st.radio(
                 "Select your answer:",
                 options,
@@ -386,18 +565,16 @@ def main():
                 key=f'radio_{current_index}'
             )
             
+            # Submit button calls check_answer, which updates the state and calls rerun
             submit_button = st.form_submit_button(
                 label='Submit Answer', 
-                disabled=st.session_state.submitted,
-                type="secondary"
+                type="secondary",
+                on_click=check_answer # Direct state update and implicitly triggers rerun
             )
-
-        if submit_button and user_choice is not None:
-            check_answer(user_choice, correct_answer)
 
 
     else:
-        # --- Quiz Finished Screen ---
+        # --- Quiz Finished Screen (UX UPGRADE) ---
         st.balloons()
         st.header("🎉 Quiz Completed! Time to Check Your Rank.")
         final_score = st.session_state.score
@@ -408,13 +585,13 @@ def main():
         st.metric(label="Final Score", value=f"{final_score} / {num_questions}", delta_color="off")
         st.metric(label="Percentage Correct", value=f"{percentage:.1f}%")
         
-        st.markdown(f"**Topic:** `{selected_category}` | **Difficulty:** `{selected_difficulty}`")
+        st.markdown(f"**Topic:** `{selected_category_name}` | **Difficulty:** `{selected_difficulty_name}`")
         st.markdown("---")
 
         # --- Score Saving Section ---
         if st.session_state.score_submitted is False and st.session_state.get('db') is not None:
-            difficulty_name = selected_difficulty
-            category_name = selected_category
+            difficulty_name = selected_difficulty_name
+            category_name = selected_category_name
             
             with st.form("score_submission_form"):
                 st.subheader("Submit Your Score to the Leaderboard")
@@ -441,7 +618,24 @@ def main():
         display_leaderboard()
         
         st.markdown("---")
-        st.button("Start New Quiz (Go to Settings)", on_click=reset_quiz, type="secondary")
+        
+        # UX UPGRADE: Custom button row for post-quiz options
+        st.subheader("What's Next?")
+        col_end1, col_end2, col_end3, col_end4 = st.columns(4) # Added one column for Review
+        
+        with col_end1:
+            st.button("Start New Challenge", on_click=start_quiz_same_settings, help="Uses the current settings: same Topic and Difficulty.", type="primary", use_container_width=True)
+            
+        with col_end2:
+            st.button("Change Settings", on_click=reset_quiz, help="Go back to the main menu to change Topic or Difficulty.", type="secondary", use_container_width=True)
+
+        with col_end3:
+            # New Feature: Review Answers
+            st.button("Review Answers", on_click=toggle_review_mode, help="Check your answers and the correct solutions.", type="secondary", use_container_width=True)
+
+        with col_end4:
+             # This button simply forces a refresh of the leaderboard data
+            st.button("Refresh Leaderboard", on_click=lambda: st.rerun(), help="Refresh to see latest scores.", type="secondary", use_container_width=True)
 
 
 if __name__ == "__main__":
